@@ -69,6 +69,30 @@ def test_return_is_separated_from_actual_revenue(monkeypatch):
     assert metrics["actual_revenue"] == 1500
     assert metrics["returned_amount"] == 1500
     assert metrics["gross_turnover"] == 3000
+    assert metrics["returned_orders"] == 1
+    assert metrics["non_cancelled_orders"] == 2
+    assert metrics["return_rate"] == 0.5
+    assert metrics["top_5_by_turnover"] == [("SKU-105", 3000)]
+
+
+def test_top_five_is_sorted_by_turnover(monkeypatch):
+    orders = make_orders(
+        [
+            [f"ORD-{number}", f"SKU-{number}", number * 100, 1, "delivered"]
+            for number in range(1, 7)
+        ]
+    )
+    monkeypatch.setattr(order_audit, "get_order_status", lambda order_id: "delivered")
+
+    metrics = order_audit.calc_sales_metrics(orders)
+
+    assert metrics["top_5_by_turnover"] == [
+        ("SKU-6", 600),
+        ("SKU-5", 500),
+        ("SKU-4", 400),
+        ("SKU-3", 300),
+        ("SKU-2", 200),
+    ]
 
 
 def test_missing_required_columns_are_rejected(tmp_path):

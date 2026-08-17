@@ -235,31 +235,54 @@ def calc_sales_metrics(df, status_getter=None):
         status_getter = get_order_status
 
     revenue_by_sku = {}
+    turnover_by_sku = {}
     returned_amount = 0
     gross_turnover = 0
+    non_cancelled_order_ids = set()
+    returned_order_ids = set()
+    status_cache = {}
 
     for _, row in df.iterrows():
-        status = status_getter(row["order_id"])
+        order_id = row["order_id"]
+        if order_id not in status_cache:
+            status_cache[order_id] = status_getter(order_id)
+        status = status_cache[order_id]
+
         if status == "cancelled":
             continue
 
         sku = row["sku"]
         amount = row["price"] * row["qty"]
+        non_cancelled_order_ids.add(order_id)
         gross_turnover += amount
+        turnover_by_sku[sku] = turnover_by_sku.get(sku, 0) + amount
 
         if status == "returned":
+            returned_order_ids.add(order_id)
             returned_amount += amount
             continue
 
         revenue_by_sku[sku] = revenue_by_sku.get(sku, 0) + amount
 
     actual_revenue = sum(revenue_by_sku.values())
+    non_cancelled_orders = len(non_cancelled_order_ids)
+    returned_orders = len(returned_order_ids)
+    return_rate = returned_orders / non_cancelled_orders if non_cancelled_orders else 0
+    top_5_by_turnover = sorted(
+        turnover_by_sku.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )[:5]
     logger.info("Расчёт завершён, обработано SKU: %d", len(revenue_by_sku))
     return {
         "revenue_by_sku": revenue_by_sku,
         "actual_revenue": actual_revenue,
         "returned_amount": returned_amount,
         "gross_turnover": gross_turnover,
+        "returned_orders": returned_orders,
+        "non_cancelled_orders": non_cancelled_orders,
+        "return_rate": return_rate,
+        "top_5_by_turnover": top_5_by_turnover,
     }
 
 
@@ -302,14 +325,32 @@ def main(args=None):
             status_getter = statuses.__getitem__
 
         metrics = calc_sales_metrics(df, status_getter)
-        for sku, total in metrics["revenue_by_sku"].items():
-            logger.info("Выручка для SKU %s: %s", sku, total)
+        logger.info("Выручка по товарам (только доставленные заказы):")
+        sorted_revenue = sorted(
+            metrics["revenue_by_sku"].items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        for position, (sku, total) in enumerate(sorted_revenue, start=1):
+            logger.info("  %d. %s — %s", position, sku, total)
         logger.info("Фактическая выручка: %s", metrics["actual_revenue"])
         logger.info("Сумма возвратов: %s", metrics["returned_amount"])
         logger.info(
             "Оборот до вычета возвратов: %s",
             metrics["gross_turnover"],
         )
+        logger.info(
+            "Доля возвратов: %.2f%% (%d из %d неотменённых заказов)",
+            metrics["return_rate"] * 100,
+            metrics["returned_orders"],
+            metrics["non_cancelled_orders"],
+        )
+        logger.info("Топ-5 товаров по обороту до вычета возвратов:")
+        for position, (sku, total) in enumerate(
+            metrics["top_5_by_turnover"],
+            start=1,
+        ):
+            logger.info("  %d. %s — %s", position, sku, total)
 
         registry = load_registry(arguments.registry)
         summary, discrepancies = reconcile_orders(df, registry)
