@@ -224,12 +224,12 @@ def get_order_status(
 def calc_revenue_by_sku(df):
     logger.info("Начат расчёт выручки по товарам")
     revenue = {}
-    for i, row in df.iterrows():
+    for _, row in df.iterrows():
         if get_order_status(row["order_id"]) == "cancelled":
             continue
         sku = row["sku"]
         amount = row["price"] * row["qty"]
-        revenue[sku] = amount
+        revenue[sku] = revenue.get(sku, 0) + amount
     logger.info("Расчёт завершён, обработано SKU: %d", len(revenue))
     return revenue
 
