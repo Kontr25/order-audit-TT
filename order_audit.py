@@ -1,3 +1,4 @@
+import argparse
 import logging
 import time
 from pathlib import Path
@@ -5,6 +6,13 @@ from zipfile import BadZipFile
 
 import pandas as pd
 import requests
+
+from reconciliation import (
+    ReconciliationError,
+    load_registry,
+    log_reconciliation_result,
+    reconcile_orders,
+)
 
 logger = logging.getLogger("order_audit")
 
@@ -34,9 +42,9 @@ class OrderApiError(OrderAuditError):
     """Ошибка получения статуса заказа из API."""
 
 
-def configure_logging():
+def configure_logging(log_level="INFO"):
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, log_level.upper()),
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -221,14 +229,17 @@ def get_order_status(
     return status
 
 
-def calc_sales_metrics(df):
+def calc_sales_metrics(df, status_getter=None):
     logger.info("Начат расчёт показателей продаж")
+    if status_getter is None:
+        status_getter = get_order_status
+
     revenue_by_sku = {}
     returned_amount = 0
     gross_turnover = 0
 
     for _, row in df.iterrows():
-        status = get_order_status(row["order_id"])
+        status = status_getter(row["order_id"])
         if status == "cancelled":
             continue
 
@@ -252,17 +263,45 @@ def calc_sales_metrics(df):
     }
 
 
-def calc_revenue_by_sku(df):
-    return calc_sales_metrics(df)["revenue_by_sku"]
+def calc_revenue_by_sku(df, status_getter=None):
+    return calc_sales_metrics(df, status_getter)["revenue_by_sku"]
 
 
-def main():
-    configure_logging()
+def parse_args(args=None):
+    parser = argparse.ArgumentParser(
+        description="Расчёт показателей и сверка заказов маркетплейса"
+    )
+    parser.add_argument("--orders", required=True, help="Путь к выгрузке заказов")
+    parser.add_argument("--registry", required=True, help="Путь к реестру заказов")
+    parser.add_argument(
+        "--status-source",
+        choices=("file", "api"),
+        default="file",
+        help="Источник статусов заказов: Excel или API (по умолчанию Excel)",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+        help="Уровень логирования",
+    )
+    return parser.parse_args(args)
+
+
+def main(args=None):
+    arguments = parse_args(args)
+    configure_logging(arguments.log_level)
     logger.info("Скрипт запущен")
 
     try:
-        df = load_orders("orders.xlsx")
-        metrics = calc_sales_metrics(df)
+        df = load_orders(arguments.orders)
+
+        status_getter = None
+        if arguments.status_source == "file":
+            statuses = dict(zip(df["order_id"], df["status"], strict=True))
+            status_getter = statuses.__getitem__
+
+        metrics = calc_sales_metrics(df, status_getter)
         for sku, total in metrics["revenue_by_sku"].items():
             logger.info("Выручка для SKU %s: %s", sku, total)
         logger.info("Фактическая выручка: %s", metrics["actual_revenue"])
@@ -271,7 +310,11 @@ def main():
             "Оборот до вычета возвратов: %s",
             metrics["gross_turnover"],
         )
-    except OrderAuditError as exc:
+
+        registry = load_registry(arguments.registry)
+        summary, discrepancies = reconcile_orders(df, registry)
+        log_reconciliation_result(summary, discrepancies)
+    except (OrderAuditError, ReconciliationError) as exc:
         logger.error("Скрипт завершён с ошибкой: %s", exc)
         return 1
     except Exception:
