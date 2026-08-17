@@ -44,6 +44,33 @@ def test_cancelled_order_is_excluded(monkeypatch):
     assert revenue == {"SKU-100": 1000}
 
 
+def test_return_is_separated_from_actual_revenue(monkeypatch):
+    orders = make_orders(
+        [
+            ["ORD-1", "SKU-105", 1500, 1, "delivered"],
+            ["ORD-2", "SKU-105", 1500, 1, "returned"],
+            ["ORD-3", "SKU-105", 1500, 1, "cancelled"],
+        ]
+    )
+    statuses = {
+        "ORD-1": "delivered",
+        "ORD-2": "returned",
+        "ORD-3": "cancelled",
+    }
+    monkeypatch.setattr(
+        order_audit,
+        "get_order_status",
+        lambda order_id: statuses[order_id],
+    )
+
+    metrics = order_audit.calc_sales_metrics(orders)
+
+    assert metrics["revenue_by_sku"] == {"SKU-105": 1500}
+    assert metrics["actual_revenue"] == 1500
+    assert metrics["returned_amount"] == 1500
+    assert metrics["gross_turnover"] == 3000
+
+
 def test_missing_required_columns_are_rejected(tmp_path):
     file_path = tmp_path / "missing_columns.xlsx"
     pd.DataFrame({"order_id": ["ORD-1"]}).to_excel(file_path, index=False)

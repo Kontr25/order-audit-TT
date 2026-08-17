@@ -221,17 +221,39 @@ def get_order_status(
     return status
 
 
-def calc_revenue_by_sku(df):
-    logger.info("Начат расчёт выручки по товарам")
-    revenue = {}
+def calc_sales_metrics(df):
+    logger.info("Начат расчёт показателей продаж")
+    revenue_by_sku = {}
+    returned_amount = 0
+    gross_turnover = 0
+
     for _, row in df.iterrows():
-        if get_order_status(row["order_id"]) == "cancelled":
+        status = get_order_status(row["order_id"])
+        if status == "cancelled":
             continue
+
         sku = row["sku"]
         amount = row["price"] * row["qty"]
-        revenue[sku] = revenue.get(sku, 0) + amount
-    logger.info("Расчёт завершён, обработано SKU: %d", len(revenue))
-    return revenue
+        gross_turnover += amount
+
+        if status == "returned":
+            returned_amount += amount
+            continue
+
+        revenue_by_sku[sku] = revenue_by_sku.get(sku, 0) + amount
+
+    actual_revenue = sum(revenue_by_sku.values())
+    logger.info("Расчёт завершён, обработано SKU: %d", len(revenue_by_sku))
+    return {
+        "revenue_by_sku": revenue_by_sku,
+        "actual_revenue": actual_revenue,
+        "returned_amount": returned_amount,
+        "gross_turnover": gross_turnover,
+    }
+
+
+def calc_revenue_by_sku(df):
+    return calc_sales_metrics(df)["revenue_by_sku"]
 
 
 def main():
@@ -240,9 +262,15 @@ def main():
 
     try:
         df = load_orders("orders.xlsx")
-        revenue = calc_revenue_by_sku(df)
-        for sku, total in revenue.items():
+        metrics = calc_sales_metrics(df)
+        for sku, total in metrics["revenue_by_sku"].items():
             logger.info("Выручка для SKU %s: %s", sku, total)
+        logger.info("Фактическая выручка: %s", metrics["actual_revenue"])
+        logger.info("Сумма возвратов: %s", metrics["returned_amount"])
+        logger.info(
+            "Оборот до вычета возвратов: %s",
+            metrics["gross_turnover"],
+        )
     except OrderAuditError as exc:
         logger.error("Скрипт завершён с ошибкой: %s", exc)
         return 1
