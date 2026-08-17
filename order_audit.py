@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 from zipfile import BadZipFile
 
@@ -12,6 +13,9 @@ ALLOWED_ORDER_STATUSES = {"delivered", "returned", "cancelled"}
 SUPPORTED_FILE_EXTENSIONS = {".xlsx", ".xlsm", ".csv"}
 API_BASE_URL = "https://api.example.com"
 API_TIMEOUT_SECONDS = 5
+API_MAX_ATTEMPTS = 3
+API_INITIAL_RETRY_DELAY_SECONDS = 1
+RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 class OrderAuditError(Exception):
@@ -109,28 +113,95 @@ def load_orders(path):
     return df
 
 
-def get_order_status(order_id):
-    logger.debug("Запрос статуса заказа: %s", order_id)
+def _wait_before_retry(
+    order_id,
+    attempt,
+    max_attempts,
+    initial_delay_seconds,
+    error,
+    sleep_function,
+):
+    delay_seconds = initial_delay_seconds * (2 ** (attempt - 1))
+    logger.warning(
+        "Не удалось получить статус заказа %s, попытка %d/%d: %s. "
+        "Повтор через %.1f сек.",
+        order_id,
+        attempt,
+        max_attempts,
+        error,
+        delay_seconds,
+    )
+    sleep_function(delay_seconds)
 
-    try:
-        resp = requests.get(
-            f"{API_BASE_URL}/orders/{order_id}/status",
-            timeout=API_TIMEOUT_SECONDS,
+
+def get_order_status(
+    order_id,
+    *,
+    max_attempts=API_MAX_ATTEMPTS,
+    initial_delay_seconds=API_INITIAL_RETRY_DELAY_SECONDS,
+    sleep_function=time.sleep,
+):
+    if max_attempts < 1:
+        raise ValueError("Количество попыток должно быть не меньше одной")
+    if initial_delay_seconds < 0:
+        raise ValueError("Задержка между попытками не может быть отрицательной")
+
+    for attempt in range(1, max_attempts + 1):
+        logger.debug(
+            "Запрос статуса заказа %s, попытка %d/%d",
+            order_id,
+            attempt,
+            max_attempts,
         )
-        resp.raise_for_status()
-    except requests.Timeout as exc:
-        raise OrderApiError(
-            f"Превышено время ожидания статуса заказа {order_id}"
-        ) from exc
-    except requests.ConnectionError as exc:
-        raise OrderApiError(f"API недоступен для заказа {order_id}") from exc
-    except requests.HTTPError as exc:
-        status_code = exc.response.status_code if exc.response is not None else "неизвестен"
-        raise OrderApiError(
-            f"API вернул HTTP {status_code} для заказа {order_id}"
-        ) from exc
-    except requests.RequestException as exc:
-        raise OrderApiError(f"Ошибка запроса статуса заказа {order_id}: {exc}") from exc
+
+        try:
+            resp = requests.get(
+                f"{API_BASE_URL}/orders/{order_id}/status",
+                timeout=API_TIMEOUT_SECONDS,
+            )
+            resp.raise_for_status()
+            break
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            if attempt == max_attempts:
+                raise OrderApiError(
+                    f"API недоступен для заказа {order_id} после {max_attempts} попыток"
+                ) from exc
+            _wait_before_retry(
+                order_id,
+                attempt,
+                max_attempts,
+                initial_delay_seconds,
+                exc,
+                sleep_function,
+            )
+        except requests.HTTPError as exc:
+            status_code = (
+                exc.response.status_code if exc.response is not None else None
+            )
+            if status_code in RETRYABLE_HTTP_STATUS_CODES:
+                if attempt == max_attempts:
+                    raise OrderApiError(
+                        f"API вернул HTTP {status_code} для заказа {order_id} "
+                        f"после {max_attempts} попыток"
+                    ) from exc
+                _wait_before_retry(
+                    order_id,
+                    attempt,
+                    max_attempts,
+                    initial_delay_seconds,
+                    f"HTTP {status_code}",
+                    sleep_function,
+                )
+                continue
+
+            displayed_status = status_code if status_code is not None else "неизвестен"
+            raise OrderApiError(
+                f"API вернул HTTP {displayed_status} для заказа {order_id}"
+            ) from exc
+        except requests.RequestException as exc:
+            raise OrderApiError(
+                f"Ошибка запроса статуса заказа {order_id}: {exc}"
+            ) from exc
 
     try:
         response_data = resp.json()
