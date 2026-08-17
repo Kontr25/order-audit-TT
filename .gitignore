@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Original test assignment artifacts (kept locally only)
+/orders.xlsx
+/Реестр заказов (для сверки).xlsx
+/Тестовое_задание_—_стажёр_вайб_кодер_текст_для_кандидата.md
+/Черновой_скрипт_для_тестового_задания.py
